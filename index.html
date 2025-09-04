@@ -10,6 +10,7 @@
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
         import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
         import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, onSnapshot } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+        import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js';
         
         // Your Firebase config
         const firebaseConfig = {
@@ -25,9 +26,10 @@
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
+        const storage = getStorage(app);
         
         // Make Firebase available globally
-        window.firebase = { auth, db, signInAnonymously, onAuthStateChanged, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, onSnapshot };
+        window.firebase = { auth, db, storage, signInAnonymously, onAuthStateChanged, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, onSnapshot, ref, uploadBytes, getDownloadURL, deleteObject };
     </script>
     <style>
         * {
@@ -311,6 +313,55 @@
             color: #991b1b;
         }
 
+        .image-upload {
+            border: 2px dashed #d1d5db;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            background: #f9fafb;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+
+        .image-upload:hover {
+            border-color: #2563eb;
+        }
+
+        .image-upload.has-image {
+            border-color: #10b981;
+            background: #f0fdf4;
+        }
+
+        .image-preview {
+            max-width: 100%;
+            max-height: 200px;
+            border-radius: 8px;
+            margin-top: 10px;
+        }
+
+        .image-remove {
+            background: #dc2626;
+            color: white;
+            border: none;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            margin-top: 5px;
+        }
+
+        .image-remove:hover {
+            background: #b91c1c;
+        }
+
+        .entry-image {
+            max-width: 100%;
+            max-height: 300px;
+            border-radius: 8px;
+            margin-top: 15px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
         @media (max-width: 768px) {
             body {
                 padding: 10px;
@@ -406,6 +457,15 @@
                 <input type="text" id="quote" placeholder="'Quote from book' - page X">
             </div>
 
+            <div class="form-group">
+                <label>Upload Photo (Optional)</label>
+                <div class="image-upload" onclick="document.getElementById('imageInput').click()">
+                    <div id="imageUploadText">📷 Click to upload a photo</div>
+                    <input type="file" id="imageInput" accept="image/*" style="display: none;" onchange="handleImageUpload(event)">
+                    <div id="imagePreview"></div>
+                </div>
+            </div>
+
             <button class="btn" onclick="saveEntry()">Save Entry</button>
             <button class="btn btn-secondary" onclick="hideForm()">Cancel</button>
         </div>
@@ -425,8 +485,73 @@
         let editingId = null;
         let currentUser = null;
         let isFirebaseReady = false;
+        let selectedImage = null;
         
         const concepts = ['Affordance', 'Signifier', 'Constraint', 'Mapping', 'Feedback', 'Conceptual Model', 'System Image'];
+
+        // Image Handling Functions
+        function handleImageUpload(event) {
+            const file = event.target.files[0];
+            if (file) {
+                // Validate file type
+                if (!file.type.startsWith('image/')) {
+                    alert('Please select an image file');
+                    return;
+                }
+                
+                // Validate file size (5MB limit)
+                if (file.size > 5 * 1024 * 1024) {
+                    alert('Image must be smaller than 5MB');
+                    return;
+                }
+                
+                selectedImage = file;
+                showImagePreview(file);
+            }
+        }
+
+        function showImagePreview(file) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const preview = document.getElementById('imagePreview');
+                const uploadText = document.getElementById('imageUploadText');
+                const uploadArea = document.querySelector('.image-upload');
+                
+                preview.innerHTML = `
+                    <img src="${e.target.result}" class="image-preview" alt="Preview">
+                    <button type="button" class="image-remove" onclick="removeImage()">Remove Image</button>
+                `;
+                uploadText.textContent = '📷 Image selected - click to change';
+                uploadArea.classList.add('has-image');
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function removeImage() {
+            selectedImage = null;
+            document.getElementById('imageInput').value = '';
+            document.getElementById('imagePreview').innerHTML = '';
+            document.getElementById('imageUploadText').textContent = '📷 Click to upload a photo';
+            document.querySelector('.image-upload').classList.remove('has-image');
+        }
+
+        async function uploadImageToFirebase(imageFile) {
+            if (!currentUser || !imageFile) return null;
+            
+            try {
+                const timestamp = Date.now();
+                const fileName = `images/${currentUser.uid}/${timestamp}_${imageFile.name}`;
+                const imageRef = window.firebase.ref(window.firebase.storage, fileName);
+                
+                const snapshot = await window.firebase.uploadBytes(imageRef, imageFile);
+                const downloadURL = await window.firebase.getDownloadURL(snapshot.ref);
+                
+                return downloadURL;
+            } catch (error) {
+                console.error('Error uploading image:', error);
+                return null;
+            }
+        }
 
         // Firebase Functions
         async function initializeFirebase() {
@@ -591,6 +716,7 @@
             document.getElementById('description').value = '';
             document.getElementById('demonstration').value = '';
             document.getElementById('quote').value = '';
+            removeImage();
         }
 
         async function saveEntry() {
@@ -605,6 +731,17 @@
                 return;
             }
 
+            // Upload image if selected
+            let imageURL = null;
+            if (selectedImage) {
+                showAuthStatus('Uploading image...', true);
+                imageURL = await uploadImageToFirebase(selectedImage);
+                if (!imageURL) {
+                    alert('Failed to upload image. Please try again.');
+                    return;
+                }
+            }
+
             const entry = {
                 id: editingId || Date.now(),
                 concept,
@@ -612,6 +749,7 @@
                 description,
                 demonstration,
                 quote,
+                imageURL,
                 timestamp: new Date().toLocaleString()
             };
 
@@ -644,6 +782,23 @@
             document.getElementById('description').value = entry.description;
             document.getElementById('demonstration').value = entry.demonstration;
             document.getElementById('quote').value = entry.quote;
+
+            // Handle existing image
+            if (entry.imageURL) {
+                const preview = document.getElementById('imagePreview');
+                const uploadText = document.getElementById('imageUploadText');
+                const uploadArea = document.querySelector('.image-upload');
+                
+                preview.innerHTML = `
+                    <img src="${entry.imageURL}" class="image-preview" alt="Current image">
+                    <button type="button" class="image-remove" onclick="removeImage()">Remove Image</button>
+                `;
+                uploadText.textContent = '📷 Image attached - click to change';
+                uploadArea.classList.add('has-image');
+                selectedImage = null; // No new file selected yet
+            } else {
+                removeImage();
+            }
 
             document.getElementById('formContainer').classList.remove('hidden');
             document.getElementById('formTitle').textContent = 'Edit Entry';
@@ -696,6 +851,7 @@
                         <div><strong>Observation:</strong> ${entry.description}</div>
                         <div><strong>Demonstrates Concept:</strong> ${entry.demonstration}</div>
                         ${entry.quote ? `<div><strong>DOET Quote:</strong> <em>${entry.quote}</em></div>` : ''}
+                        ${entry.imageURL ? `<img src="${entry.imageURL}" class="entry-image" alt="Observation photo">` : ''}
                     </div>
                 </div>
             `).join('');
